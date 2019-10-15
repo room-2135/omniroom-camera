@@ -54,7 +54,7 @@ static map<string, callback> commandsMapping;
 
 static SoupWebsocketConnection *ws_conn = NULL;
 static enum AppState app_state = APP_STATE_UNKNOWN;
-static string server_url = "ws://192.168.4.1:8000";
+static string server_url = "ws://127.0.0.1:8000";
 static string local_id = "test";
 static bool strict_ssl = false;
 
@@ -203,7 +203,6 @@ static void send_ice_candidate_message(GstElement* webrtc G_GNUC_UNUSED, guint m
 
 
 static void send_room_peer_sdp(GstWebRTCSessionDescription* desc, string peer_id) {
-    JsonObject *msg, *sdp;
     string text, sdptype, sdptext;
 
     g_assert_cmpint(app_state, >=, ROOM_CALL_OFFERING);
@@ -216,13 +215,17 @@ static void send_room_peer_sdp(GstWebRTCSessionDescription* desc, string peer_id
     cout << "Sending sdp offer to " << peer_id << endl << text << endl;
 
     text = gst_sdp_message_as_text(desc->sdp);
-    string m ="{\"command\": \"SDP_OFFER\", \"identifier\": \"" + peer_id + "\", \"offer\":{ \"type\": \"offer\", \"sdp\": \"" + text + "\"}";
-    soup_websocket_connection_send_text(ws_conn, m.c_str());
+    json sdp;
+    sdp["command"] = "SDP_OFFER";
+    sdp["identifier"] = peer_id;
+    sdp["offer"]["type"] = "offer";
+    sdp["offer"]["offer"] = text;
+    soup_websocket_connection_send_text(ws_conn, sdp.dump().c_str());
 }
 
 
 /* Offer created by our pipeline, to be sent to the peer */
-static void on_offer_created(GstPromise* promise, const gchar* peer_id) {
+static void on_offer_created(GstPromise* promise, string* peer_id) {
     GstElement *webrtc;
     GstWebRTCSessionDescription *offer;
     const GstStructure *reply;
@@ -231,29 +234,27 @@ static void on_offer_created(GstPromise* promise, const gchar* peer_id) {
 
     g_assert_cmpint (gst_promise_wait (promise), ==, GST_PROMISE_RESULT_REPLIED);
     reply = gst_promise_get_reply (promise);
-    gst_structure_get (reply, "offer",
-            GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
+    gst_structure_get (reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
     gst_promise_unref (promise);
 
-    promise = gst_promise_new ();
-    webrtc = gst_bin_get_by_name (GST_BIN (pipeline), peer_id);
-    g_assert_nonnull (webrtc);
-    g_signal_emit_by_name (webrtc, "set-local-description", offer, promise);
-    gst_promise_interrupt (promise);
-    gst_promise_unref (promise);
+    promise = gst_promise_new();
+    webrtc = gst_bin_get_by_name(GST_BIN (pipeline), peer_id->c_str());
+    g_assert_nonnull(webrtc);
+    g_signal_emit_by_name(webrtc, "set-local-description", offer, promise);
+    gst_promise_interrupt(promise);
+    gst_promise_unref(promise);
 
     /* Send offer to peer */
-    send_room_peer_sdp (offer, peer_id);
-    gst_webrtc_session_description_free (offer);
+    send_room_peer_sdp(offer, *peer_id);
+    gst_webrtc_session_description_free(offer);
 }
 
 
-static void on_negotiation_needed(GstElement* webrtc, const gchar* peer_id) {
+static void on_negotiation_needed(GstElement* webrtc, gpointer peer_id) {
     GstPromise *promise;
 
     app_state = ROOM_CALL_OFFERING;
-    promise = gst_promise_new_with_change_func (
-            (GstPromiseChangeFunc) on_offer_created, (gpointer) peer_id, NULL);
+    promise = gst_promise_new_with_change_func ((GstPromiseChangeFunc) on_offer_created, peer_id, NULL);
     g_signal_emit_by_name (webrtc, "create-offer", NULL, promise);
 }
 
@@ -299,9 +300,11 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
     string name = "queue-" + peer_id;
     q = gst_element_factory_make("queue", name.c_str());
     g_assert_nonnull(q);
+    cout << "Created webrtcbin: " << peer_id << endl;
     webrtc = gst_element_factory_make("webrtcbin", peer_id.c_str());
     g_assert_nonnull(webrtc);
 
+    g_assert_nonnull(pipeline);
     gst_bin_add_many(GST_BIN (pipeline), q, webrtc, NULL);
 
     srcpad = gst_element_get_static_pad(q, "src");
@@ -330,8 +333,14 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
      * XXX: We must connect this after webrtcbin has been linked to a source via
      * get_request_pad() and before we go from NULL->READY otherwise webrtcbin
      * will create an SDP offer with no media lines in it. */
+    peers.push_back(peer_id);
+    cout << "Size: " << peers.size() << endl;
+    vector<string>::iterator it = std::find(peers.begin(), peers.end(), peer_id);
+    cout << "Test: " << (*it) << endl;
+    string* test = &(*it);
+    cout << "Test: " << *test << endl;
     if (offer) {
-        g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK (on_negotiation_needed), (gpointer) peer_id.c_str());
+        g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK (on_negotiation_needed), (gpointer) test);
     }
 
     /* We need to transmit this ICE candidate to the browser via the websockets
@@ -407,9 +416,10 @@ static bool join() {
 }
 
 
-
 static void doRegistration(json data) {
     app_state = SERVER_REGISTERED;
+    if (!start_pipeline ())
+          cleanup_and_quit_loop ("ERROR: failed to start pipeline", ROOM_CALL_ERROR);
     cout << "Registered with server" << endl;
 }
 
@@ -670,7 +680,25 @@ static bool check_plugins(void) {
 }
 
 
+static GOptionEntry entries[] =
+{
+  { "local-id", 0, 0, G_OPTION_ARG_STRING, &local_id, "Camera identifier", "string" },
+  { NULL },
+};
+
+
 int main(int argc, char *argv[]) {
+    GOptionContext *context;
+    GError *error = NULL;
+
+    context = g_option_context_new ("- gstreamer webrtc sendrecv demo");
+    g_option_context_add_main_entries (context, entries, NULL);
+    g_option_context_add_group (context, gst_init_get_option_group ());
+    if (!g_option_context_parse (context, &argc, &argv, &error)) {
+        g_printerr ("Error initializing: %s\n", error->message);
+        return -1;
+    }
+
     loop = g_main_loop_new(NULL, false);
 
     commandsMapping["JOINED_CAMERA"] = doRegistration;
@@ -679,7 +707,6 @@ int main(int argc, char *argv[]) {
 
     if (!check_plugins ())
         return -1;
-
     connect();
 
     g_main_loop_run(loop);
