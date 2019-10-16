@@ -197,7 +197,13 @@ static void send_ice_candidate_message(GstElement* webrtc G_GNUC_UNUSED, guint m
     text = get_string_from_json_object(msg);
     json_object_unref(msg);
 
-    send_room_peer_msg(text, peer_id);
+    json sdp;
+    sdp["command"] = "ICE_CANDITATE";
+    sdp["identifier"] = peer_id;
+    sdp["canditate"] = "offer";
+    sdp["sdpMLineIndex"] = text;
+    soup_websocket_connection_send_text(ws_conn, sdp.dump().c_str());
+
     g_free(text);
 }
 
