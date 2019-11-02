@@ -58,12 +58,6 @@ static string server_url = "ws://127.0.0.1:8000";
 static string local_id = "test";
 static bool strict_ssl = false;
 
-static const gchar* find_peer_from_list(const gchar* peer_id) {
-    //return (g_list_find_custom(peers, peer_id, compare_str_glist))->data;
-    return "";
-}
-
-
 static bool cleanup_and_quit_loop(string msg, enum AppState state) {
     if(!msg.empty())
         cout << msg << endl;
@@ -86,24 +80,6 @@ static bool cleanup_and_quit_loop(string msg, enum AppState state) {
 
     /* To allow usage as a GSourceFunc */
     return G_SOURCE_REMOVE;
-}
-
-
-static gchar* get_string_from_json_object(JsonObject * object) {
-    JsonNode *root;
-    JsonGenerator *generator;
-    gchar *text;
-
-    /* Make it the root node */
-    root = json_node_init_object(json_node_alloc(), object);
-    generator = json_generator_new();
-    json_generator_set_root(generator, root);
-    text = json_generator_to_data(generator, NULL);
-
-    /* Release everything */
-    g_object_unref(generator);
-    json_node_free(root);
-    return text;
 }
 
 
@@ -131,84 +107,25 @@ static void handle_media_stream(GstPad* pad, GstElement* pipe, const char* conve
 }
 
 
-static void on_incoming_decodebin_stream(GstElement* decodebin, GstPad* pad, GstElement* pipe) {
-    GstCaps* caps;
-    const gchar* name;
-
-    if (!gst_pad_has_current_caps(pad)) {
-        g_printerr("Pad '%s' has no caps, can't do anything, ignoring\n", GST_PAD_NAME(pad));
-        return;
-    }
-
-    caps = gst_pad_get_current_caps(pad);
-    name = gst_structure_get_name(gst_caps_get_structure(caps, 0));
-
-    if(g_str_has_prefix(name, "video")) {
-        handle_media_stream(pad, pipe, "videoconvert", "autovideosink");
-    } else if(g_str_has_prefix(name, "audio")) {
-        handle_media_stream(pad, pipe, "audioconvert", "autoaudiosink");
-    } else {
-        g_printerr("Unknown pad %s, ignoring", GST_PAD_NAME(pad));
-    }
-}
-
-
-static void on_incoming_stream(GstElement* webrtc, GstPad* pad, GstElement* pipe) {
-    GstElement *decodebin;
-    GstPad* sinkpad;
-
-    if (GST_PAD_DIRECTION (pad) != GST_PAD_SRC)
-        return;
-
-    decodebin = gst_element_factory_make("decodebin", NULL);
-    g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_incoming_decodebin_stream), pipe);
-    gst_bin_add(GST_BIN(pipe), decodebin);
-    gst_element_sync_state_with_parent(decodebin);
-
-    sinkpad = gst_element_get_static_pad(decodebin, "sink");
-    gst_pad_link(pad, sinkpad);
-    gst_object_unref(sinkpad);
-}
-
-
-static void send_room_peer_msg(const gchar* text, const gchar* peer_id) {
-    gchar* msg;
-
-    msg = g_strdup_printf("ROOM_PEER_MSG %s %s", peer_id, text);
-    soup_websocket_connection_send_text(ws_conn, msg);
-    g_free(msg);
-}
-
-
-static void send_ice_candidate_message(GstElement* webrtc G_GNUC_UNUSED, guint mlineindex, gchar* candidate, const gchar* peer_id) {
-    gchar* text;
-    JsonObject *ice, *msg;
-
+static void sendICECandidate(GstElement* webrtc G_GNUC_UNUSED, guint mlineindex, gchar* candidate, gpointer peer_id) {
     if(app_state < ROOM_CALL_OFFERING) {
         cleanup_and_quit_loop("Can't send ICE, not in call", APP_STATE_ERROR);
         return;
     }
 
-    ice = json_object_new();
-    json_object_set_string_member(ice, "candidate", candidate);
-    json_object_set_int_member(ice, "sdpMLineIndex", mlineindex);
-    msg = json_object_new();
-    json_object_set_object_member(msg, "ice", ice);
-    text = get_string_from_json_object(msg);
-    json_object_unref(msg);
+    json ice;
+    ice["candidate"] = candidate;
+    ice["sdpMLineIndex"] = mlineindex;
 
     json sdp;
-    sdp["command"] = "ICE_CANDITATE";
-    sdp["identifier"] = peer_id;
-    sdp["canditate"] = "offer";
-    sdp["sdpMLineIndex"] = text;
+    sdp["command"] = "ICE_CANDIDATE";
+    sdp["identifier"] = peers.back();
+    sdp["ice"] = ice;
     soup_websocket_connection_send_text(ws_conn, sdp.dump().c_str());
-
-    g_free(text);
 }
 
 
-static void send_room_peer_sdp(GstWebRTCSessionDescription* desc, string peer_id) {
+static void sendSDPOffer(GstWebRTCSessionDescription* desc, string peer_id) {
     string text, sdptype, sdptext;
 
     g_assert_cmpint(app_state, >=, ROOM_CALL_OFFERING);
@@ -225,13 +142,13 @@ static void send_room_peer_sdp(GstWebRTCSessionDescription* desc, string peer_id
     sdp["command"] = "SDP_OFFER";
     sdp["identifier"] = peer_id;
     sdp["offer"]["type"] = "offer";
-    sdp["offer"]["offer"] = text;
+    sdp["offer"]["sdp"] = text;
     soup_websocket_connection_send_text(ws_conn, sdp.dump().c_str());
 }
 
 
 /* Offer created by our pipeline, to be sent to the peer */
-static void on_offer_created(GstPromise* promise, string* peer_id) {
+static void onOfferCreated(GstPromise* promise, string* peer_id) {
     GstElement *webrtc;
     GstWebRTCSessionDescription *offer;
     const GstStructure *reply;
@@ -251,16 +168,16 @@ static void on_offer_created(GstPromise* promise, string* peer_id) {
     gst_promise_unref(promise);
 
     /* Send offer to peer */
-    send_room_peer_sdp(offer, *peer_id);
+    sendSDPOffer(offer, *peer_id);
     gst_webrtc_session_description_free(offer);
 }
 
 
-static void on_negotiation_needed(GstElement* webrtc, gpointer peer_id) {
+static void onNegotiationNeeded(GstElement* webrtc, gpointer peer_id) {
     GstPromise *promise;
 
     app_state = ROOM_CALL_OFFERING;
-    promise = gst_promise_new_with_change_func ((GstPromiseChangeFunc) on_offer_created, peer_id, NULL);
+    promise = gst_promise_new_with_change_func ((GstPromiseChangeFunc) onOfferCreated, peer_id, NULL);
     g_signal_emit_by_name (webrtc, "create-offer", NULL, promise);
 }
 
@@ -340,22 +257,14 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
      * get_request_pad() and before we go from NULL->READY otherwise webrtcbin
      * will create an SDP offer with no media lines in it. */
     peers.push_back(peer_id);
-    cout << "Size: " << peers.size() << endl;
-    vector<string>::iterator it = std::find(peers.begin(), peers.end(), peer_id);
-    cout << "Test: " << (*it) << endl;
-    string* test = &(*it);
-    cout << "Test: " << *test << endl;
     if (offer) {
-        g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK (on_negotiation_needed), (gpointer) test);
+        g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK (onNegotiationNeeded), (gpointer) &(peers.back()));
     }
 
     /* We need to transmit this ICE candidate to the browser via the websockets
      * signalling server. Incoming ice candidates from the browser need to be
      * added by us too, see on_server_message() */
-    g_signal_connect(webrtc, "on-ice-candidate", G_CALLBACK (send_ice_candidate_message), (gpointer) peer_id.c_str());
-    /* Incoming streams will be exposed via this signal */
-    //g_signal_connect (webrtc, "pad-added", G_CALLBACK (on_incoming_stream),
-    //        pipeline);
+    g_signal_connect(webrtc, "on-ice-candidate", G_CALLBACK (sendICECandidate), (gpointer) peer_id.c_str());
 
     /* Set to pipeline branch to PLAYING */
     ret = gst_element_sync_state_with_parent(q);
@@ -434,64 +343,7 @@ static void notMapped(json data) {
 }
 
 
-static void handle_error_message(string msg) {
-    cout << "Server error: " << msg << endl;
-    switch (app_state) {
-        case SERVER_CONNECTING:
-            app_state = SERVER_CONNECTION_ERROR;
-            break;
-        case SERVER_REGISTERING:
-            app_state = SERVER_REGISTRATION_ERROR;
-            break;
-        case ROOM_JOINING:
-            app_state = ROOM_JOIN_ERROR;
-            break;
-        case ROOM_JOINED:
-        case ROOM_CALL_NEGOTIATING:
-        case ROOM_CALL_OFFERING:
-        case ROOM_CALL_ANSWERING:
-            app_state = ROOM_CALL_ERROR;
-            break;
-        case ROOM_CALL_STARTED:
-        case ROOM_CALL_STOPPING:
-        case ROOM_CALL_STOPPED:
-            app_state = ROOM_CALL_ERROR;
-            break;
-        default:
-            app_state = APP_STATE_ERROR;
-    }
-    cleanup_and_quit_loop (msg, APP_STATE_UNKNOWN);
-}
-
-
-static void on_answer_created(GstPromise * promise, string peer_id) {
-    GstElement *webrtc;
-    GstWebRTCSessionDescription *answer;
-    const GstStructure *reply;
-
-    g_assert_cmpint (app_state, ==, ROOM_CALL_ANSWERING);
-
-    g_assert_cmpint (gst_promise_wait (promise), ==, GST_PROMISE_RESULT_REPLIED);
-    reply = gst_promise_get_reply (promise);
-    gst_structure_get (reply, "answer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &answer, NULL);
-    gst_promise_unref (promise);
-
-    promise = gst_promise_new ();
-    webrtc = gst_bin_get_by_name (GST_BIN (pipeline), peer_id.c_str());
-    g_assert_nonnull (webrtc);
-    g_signal_emit_by_name (webrtc, "set-local-description", answer, promise);
-    gst_promise_interrupt (promise);
-    gst_promise_unref (promise);
-
-    /* Send offer to peer */
-    send_room_peer_sdp (answer, peer_id);
-    gst_webrtc_session_description_free (answer);
-
-    app_state = ROOM_CALL_STARTED;
-}
-
-
-static void handle_sdp_answer(string peer_id, string text) {
+static void onSDPAnswer(json data) {
     int ret;
     GstPromise *promise;
     GstElement *webrtc;
@@ -500,20 +352,24 @@ static void handle_sdp_answer(string peer_id, string text) {
 
     g_assert_cmpint(app_state, >=, ROOM_CALL_OFFERING);
 
-    cout << "Received answer: " << endl << text << endl;
+    cout << "Received answer: " << endl << data["offer"] << endl;
 
     ret = gst_sdp_message_new(&sdp);
     g_assert_cmpint(ret, ==, GST_SDP_OK);
 
-    ret = gst_sdp_message_parse_buffer((guint8*)text.c_str(), text.length(), sdp);
+    string sdp_message = data["offer"]["sdp"].dump();
+
+    ret = gst_sdp_message_parse_buffer((guint8*)sdp_message.c_str(), sdp_message.length(), sdp);
     g_assert_cmpint (ret, ==, GST_SDP_OK);
 
     answer = gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp);
     g_assert_nonnull(answer);
 
+    string identifier = data["identifier"];
+
     /* Set remote description on our pipeline */
     promise = gst_promise_new();
-    webrtc = gst_bin_get_by_name(GST_BIN (pipeline), peer_id.c_str());
+    webrtc = gst_bin_get_by_name(GST_BIN (pipeline), identifier.c_str());
     g_assert_nonnull(webrtc);
     g_signal_emit_by_name(webrtc, "set-remote-description", answer, promise);
     gst_object_unref(webrtc);
@@ -523,65 +379,16 @@ static void handle_sdp_answer(string peer_id, string text) {
 }
 
 
-static gboolean handle_peer_message(string peer_id, string msg) {
-    JsonNode *root;
-    JsonObject *object, *child;
-    JsonParser *parser = json_parser_new();
-    if (!json_parser_load_from_data(parser, msg.c_str(), -1, NULL)) {
-        g_printerr("Unknown message '%s' from '%s', ignoring", msg, peer_id);
-        g_object_unref(parser);
-        return false;
-    }
+static void onICEAnswer(json data) {
+    string identifier = data["identifier"];
+    string candidate = data["ice"]["candidate"];
+    gint sdpmlineindex = data["ice"]["sdpMLineIndex"];
 
-    root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root)) {
-        g_printerr ("Unknown json message '%s' from '%s', ignoring", msg, peer_id);
-        g_object_unref(parser);
-        return false;
-    }
-
-    g_print("Message from peer %s: %s\n", peer_id, msg);
-
-    object = json_node_get_object(root);
-    /* Check type of JSON message */
-    if (json_object_has_member(object, "sdp")) {
-        string text, sdp_type;
-
-        g_assert_cmpint(app_state, >=, ROOM_JOINED);
-
-        child = json_object_get_object_member (object, "sdp");
-
-        if (!json_object_has_member (child, "type")) {
-            cleanup_and_quit_loop ("ERROR: received SDP without 'type'", ROOM_CALL_ERROR);
-            return false;
-        }
-
-        sdp_type = json_object_get_string_member(child, "type");
-        text = json_object_get_string_member(child, "sdp");
-
-        g_assert_cmpint (app_state, >=, ROOM_CALL_OFFERING);
-        handle_sdp_answer (peer_id, text);
-        app_state = ROOM_CALL_STARTED;
-    } else if (json_object_has_member (object, "ice")) {
-        GstElement *webrtc;
-        string candidate;
-        gint sdpmlineindex;
-
-        child = json_object_get_object_member (object, "ice");
-        candidate = json_object_get_string_member (child, "candidate");
-        sdpmlineindex = json_object_get_int_member (child, "sdpMLineIndex");
-
-        /* Add ice candidate sent by remote peer */
-        webrtc = gst_bin_get_by_name (GST_BIN (pipeline), peer_id.c_str());
-        g_assert_nonnull (webrtc);
-        g_signal_emit_by_name (webrtc, "add-ice-candidate", sdpmlineindex,
-                candidate);
-        gst_object_unref (webrtc);
-    } else {
-        g_printerr ("Ignoring unknown JSON message:\n%s\n", msg);
-    }
-    g_object_unref (parser);
-    return true;
+    /* Add ice candidate sent by remote peer */
+    GstElement* webrtc = gst_bin_get_by_name(GST_BIN (pipeline), identifier.c_str());
+    g_assert_nonnull(webrtc);
+    g_signal_emit_by_name(webrtc, "add-ice-candidate", sdpmlineindex, candidate.c_str());
+    gst_object_unref(webrtc);
 }
 
 
@@ -602,22 +409,6 @@ static void onMessage(SoupWebsocketConnection* conn, SoupWebsocketDataType type,
         } else {
             cout << "Command not found: " << data << endl;
         }
-
-        //if (data["command"]) {
-            /*
-            string text, *sdp_type;
-
-            text = json_object_get_string_member(object, "command");
-
-            } else if (g_str_has_prefix(text.c_str(), "CALL")) {
-                const gchar* client_id = json_object_get_string_member(object, "identifier");
-                g_print("Client %s is calling...\n", client_id);
-                g_print("Negotiating with client %s\n", client_id);
-                call_peer(client_id);
-                //peers = g_list_prepend(peers, client_id);
-            }
-            */
-        //}
     } else {
         cout << "Received unknown binary message, ignoring" << endl;
     }
@@ -710,6 +501,8 @@ int main(int argc, char *argv[]) {
     commandsMapping["JOINED_CAMERA"] = doRegistration;
     commandsMapping["UPDATE_CAMERAS"] = notMapped;
     commandsMapping["CALL"] = callPeer;
+    commandsMapping["SDP_ANSWER"] = onSDPAnswer;
+    commandsMapping["ICE_ANSWER"] = onICEAnswer;
 
     if (!check_plugins ())
         return -1;
