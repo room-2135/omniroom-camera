@@ -1,3 +1,5 @@
+// Copyright 2019 Nicolas Ballet
+
 #include <gst/gst.h>
 #include <gst/sdp/sdp.h>
 #define GST_USE_UNSTABLE_API
@@ -11,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <regex>
 #include <exception>
 
 #include "json.hpp"
@@ -55,17 +58,17 @@ static map<string, callback> commandsMapping;
 static SoupWebsocketConnection *ws_conn = NULL;
 static enum AppState app_state = APP_STATE_UNKNOWN;
 static string server_url = "ws://127.0.0.1:8000";
-static string local_id = "test";
+static string local_id = "1234567890ab";
 static bool strict_ssl = false;
 
 static bool cleanup_and_quit_loop(string msg, enum AppState state) {
-    if(!msg.empty())
+    if (!msg.empty())
         cout << msg << endl;
 
-    if(state > 0)
+    if (state > 0)
         app_state = state;
 
-    if(ws_conn) {
+    if (ws_conn) {
         if (soup_websocket_connection_get_state(ws_conn) == SOUP_WEBSOCKET_STATE_OPEN)
             /* This will call us again */
             soup_websocket_connection_close(ws_conn, 1000, "");
@@ -73,7 +76,7 @@ static bool cleanup_and_quit_loop(string msg, enum AppState state) {
             g_object_unref(ws_conn);
     }
 
-    if(loop) {
+    if (loop) {
         g_main_loop_quit(loop);
         loop = NULL;
     }
@@ -83,35 +86,13 @@ static bool cleanup_and_quit_loop(string msg, enum AppState state) {
 }
 
 
-static void handle_media_stream(GstPad* pad, GstElement* pipe, const char* convert_name, const char* sink_name) {
-    GstPad *qpad;
-    GstElement *q, *conv, *sink;
-    GstPadLinkReturn ret;
-
-    q = gst_element_factory_make("queue", NULL);
-    g_assert_nonnull(q);
-    conv = gst_element_factory_make(convert_name, NULL);
-    g_assert_nonnull(conv);
-    sink = gst_element_factory_make(sink_name, NULL);
-    g_assert_nonnull(sink);
-    gst_bin_add_many(GST_BIN (pipe), q, conv, sink, NULL);
-    gst_element_sync_state_with_parent(q);
-    gst_element_sync_state_with_parent(conv);
-    gst_element_sync_state_with_parent(sink);
-    gst_element_link_many(q, conv, sink, NULL);
-
-    qpad = gst_element_get_static_pad(q, "sink");
-
-    ret = gst_pad_link(pad, qpad);
-    g_assert_cmpint(ret, ==, GST_PAD_LINK_OK);
-}
-
-
 static void sendICECandidate(GstElement* webrtc G_GNUC_UNUSED, guint mlineindex, gchar* candidate, gpointer peer_id) {
-    if(app_state < ROOM_CALL_OFFERING) {
+    if (app_state < ROOM_CALL_OFFERING) {
         cleanup_and_quit_loop("Can't send ICE, not in call", APP_STATE_ERROR);
         return;
     }
+
+    std::string* identifier = static_cast<std::string*>(peer_id);
 
     json ice;
     ice["candidate"] = candidate;
@@ -126,18 +107,11 @@ static void sendICECandidate(GstElement* webrtc G_GNUC_UNUSED, guint mlineindex,
 
 
 static void sendSDPOffer(GstWebRTCSessionDescription* desc, string peer_id) {
-    string text, sdptype, sdptext;
-
     g_assert_cmpint(app_state, >=, ROOM_CALL_OFFERING);
 
-    if (desc->type == GST_WEBRTC_SDP_TYPE_OFFER)
-        sdptype = "offer";
-    else
-        g_assert_not_reached();
-
+    string text = gst_sdp_message_as_text(desc->sdp);
     cout << "Sending sdp offer to " << peer_id << endl << text << endl;
 
-    text = gst_sdp_message_as_text(desc->sdp);
     json sdp;
     sdp["command"] = "SDP_OFFER";
     sdp["identifier"] = peer_id;
@@ -148,27 +122,29 @@ static void sendSDPOffer(GstWebRTCSessionDescription* desc, string peer_id) {
 
 
 /* Offer created by our pipeline, to be sent to the peer */
-static void onOfferCreated(GstPromise* promise, string* peer_id) {
+static void onOfferCreated(GstPromise* promise, gpointer peer_id) {
     GstElement *webrtc;
     GstWebRTCSessionDescription *offer;
     const GstStructure *reply;
 
-    g_assert_cmpint (app_state, ==, ROOM_CALL_OFFERING);
+    std::string* identifier = static_cast<std::string*>(peer_id);
 
-    g_assert_cmpint (gst_promise_wait (promise), ==, GST_PROMISE_RESULT_REPLIED);
-    reply = gst_promise_get_reply (promise);
-    gst_structure_get (reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
-    gst_promise_unref (promise);
+    g_assert_cmpint(app_state, ==, ROOM_CALL_OFFERING);
+
+    g_assert_cmpint(gst_promise_wait(promise), ==, GST_PROMISE_RESULT_REPLIED);
+    reply = gst_promise_get_reply(promise);
+    gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
+    gst_promise_unref(promise);
 
     promise = gst_promise_new();
-    webrtc = gst_bin_get_by_name(GST_BIN (pipeline), peer_id->c_str());
+    webrtc = gst_bin_get_by_name(GST_BIN(pipeline), identifier->c_str());
     g_assert_nonnull(webrtc);
     g_signal_emit_by_name(webrtc, "set-local-description", offer, promise);
     gst_promise_interrupt(promise);
     gst_promise_unref(promise);
 
     /* Send offer to peer */
-    sendSDPOffer(offer, *peer_id);
+    sendSDPOffer(offer, *identifier);
     gst_webrtc_session_description_free(offer);
 }
 
@@ -176,9 +152,11 @@ static void onOfferCreated(GstPromise* promise, string* peer_id) {
 static void onNegotiationNeeded(GstElement* webrtc, gpointer peer_id) {
     GstPromise *promise;
 
+    std::string* identifier = static_cast<std::string*>(peer_id);
+
     app_state = ROOM_CALL_OFFERING;
-    promise = gst_promise_new_with_change_func ((GstPromiseChangeFunc) onOfferCreated, peer_id, NULL);
-    g_signal_emit_by_name (webrtc, "create-offer", NULL, promise);
+    promise = gst_promise_new_with_change_func((GstPromiseChangeFunc) onOfferCreated, peer_id, NULL);
+    g_signal_emit_by_name(webrtc, "create-offer", NULL, promise);
 }
 
 
@@ -187,31 +165,31 @@ static void remove_peer_from_pipeline(string peer_id) {
     GstPad *srcpad, *sinkpad;
     GstElement *webrtc, *q, *tee;
 
-    webrtc = gst_bin_get_by_name (GST_BIN (pipeline), peer_id.c_str());
+    webrtc = gst_bin_get_by_name(GST_BIN(pipeline), peer_id.c_str());
     if (!webrtc)
         return;
 
-    gst_bin_remove (GST_BIN (pipeline), webrtc);
-    gst_object_unref (webrtc);
+    gst_bin_remove(GST_BIN(pipeline), webrtc);
+    gst_object_unref(webrtc);
 
-    qname = g_strdup_printf ("queue-%s", peer_id);
-    q = gst_bin_get_by_name (GST_BIN (pipeline), qname);
-    g_free (qname);
+    qname = g_strdup_printf("queue-%s", peer_id);
+    q = gst_bin_get_by_name(GST_BIN(pipeline), qname);
+    g_free(qname);
 
-    sinkpad = gst_element_get_static_pad (q, "sink");
-    g_assert_nonnull (sinkpad);
-    srcpad = gst_pad_get_peer (sinkpad);
-    g_assert_nonnull (srcpad);
-    gst_object_unref (sinkpad);
+    sinkpad = gst_element_get_static_pad(q, "sink");
+    g_assert_nonnull(sinkpad);
+    srcpad = gst_pad_get_peer(sinkpad);
+    g_assert_nonnull(srcpad);
+    gst_object_unref(sinkpad);
 
-    gst_bin_remove (GST_BIN (pipeline), q);
-    gst_object_unref (q);
+    gst_bin_remove(GST_BIN(pipeline), q);
+    gst_object_unref(q);
 
-    tee = gst_bin_get_by_name (GST_BIN (pipeline), "videotee");
-    g_assert_nonnull (tee);
-    gst_element_release_request_pad (tee, srcpad);
-    gst_object_unref (srcpad);
-    gst_object_unref (tee);
+    tee = gst_bin_get_by_name(GST_BIN(pipeline), "videotee");
+    g_assert_nonnull(tee);
+    gst_element_release_request_pad(tee, srcpad);
+    gst_object_unref(srcpad);
+    gst_object_unref(tee);
 }
 
 
@@ -228,7 +206,7 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
     g_assert_nonnull(webrtc);
 
     g_assert_nonnull(pipeline);
-    gst_bin_add_many(GST_BIN (pipeline), q, webrtc, NULL);
+    gst_bin_add_many(GST_BIN(pipeline), q, webrtc, NULL);
 
     srcpad = gst_element_get_static_pad(q, "src");
     g_assert_nonnull(srcpad);
@@ -239,7 +217,7 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
     gst_object_unref(srcpad);
     gst_object_unref(sinkpad);
 
-    tee = gst_bin_get_by_name(GST_BIN (pipeline), "videotee");
+    tee = gst_bin_get_by_name(GST_BIN(pipeline), "videotee");
     g_assert_nonnull(tee);
     srcpad = gst_element_get_request_pad(tee, "src_%u");
     g_assert_nonnull(srcpad);
@@ -258,13 +236,13 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
      * will create an SDP offer with no media lines in it. */
     peers.push_back(peer_id);
     if (offer) {
-        g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK (onNegotiationNeeded), (gpointer) &(peers.back()));
+        g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK(onNegotiationNeeded), static_cast<gpointer>(&(peers.back())));
     }
 
     /* We need to transmit this ICE candidate to the browser via the websockets
      * signalling server. Incoming ice candidates from the browser need to be
      * added by us too, see on_server_message() */
-    g_signal_connect(webrtc, "on-ice-candidate", G_CALLBACK (sendICECandidate), (gpointer) peer_id.c_str());
+    g_signal_connect(webrtc, "on-ice-candidate", G_CALLBACK(sendICECandidate), static_cast<gpointer>(&(peers.back())));
 
     /* Set to pipeline branch to PLAYING */
     ret = gst_element_sync_state_with_parent(q);
@@ -292,28 +270,28 @@ static gboolean start_pipeline(void) {
      * streams, so we use a separate webrtcbin for each peer, but all of them are
      * inside the same pipeline. We start by connecting it to a fakesink so that
      * we can preroll early. */
-    pipeline = gst_parse_launch ("tee name=videotee ! queue ! fakesink "
+    pipeline = gst_parse_launch("tee name=videotee ! queue ! fakesink "
             "videotestsrc ! videoconvert ! videoscale ! video/x-raw,width=800,height=600,framerate=30/1 ! queue ! vp8enc deadline=1 ! rtpvp8pay ! "
             "queue ! " RTP_CAPS_VP8(96) " ! videotee. ",
             &error);
 
     if (error) {
-        g_printerr ("Failed to parse launch: %s\n", error->message);
-        g_error_free (error);
+        g_printerr("Failed to parse launch: %s\n", error->message);
+        g_error_free(error);
         goto err;
     }
 
-    g_print ("Starting pipeline, not transmitting yet\n");
-    ret = gst_element_set_state (GST_ELEMENT (pipeline), GST_STATE_PLAYING);
+    g_print("Starting pipeline, not transmitting yet\n");
+    ret = gst_element_set_state(GST_ELEMENT(pipeline), GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE)
         goto err;
 
     return true;
 
 err:
-    g_print ("State change failure\n");
+    g_print("State change failure\n");
     if (pipeline)
-        g_clear_object (&pipeline);
+        g_clear_object(&pipeline);
     return false;
 }
 
@@ -333,8 +311,8 @@ static bool join() {
 
 static void doRegistration(json data) {
     app_state = SERVER_REGISTERED;
-    if (!start_pipeline ())
-          cleanup_and_quit_loop ("ERROR: failed to start pipeline", ROOM_CALL_ERROR);
+    if (!start_pipeline())
+          cleanup_and_quit_loop("ERROR: failed to start pipeline", ROOM_CALL_ERROR);
     cout << "Registered with server" << endl;
 }
 
@@ -352,15 +330,17 @@ static void onSDPAnswer(json data) {
 
     g_assert_cmpint(app_state, >=, ROOM_CALL_OFFERING);
 
-    cout << "Received answer: " << endl << data["offer"] << endl;
+    //cout << "Received SDP answer: " << endl << data["offer"] << endl;
 
     ret = gst_sdp_message_new(&sdp);
     g_assert_cmpint(ret, ==, GST_SDP_OK);
 
-    string sdp_message = data["offer"]["sdp"].dump();
+    std::regex reg("\\\\r\\\\n");
+    string sdp_message = std::regex_replace(data["offer"]["sdp"].dump(), reg, "\r\n");
 
-    ret = gst_sdp_message_parse_buffer((guint8*)sdp_message.c_str(), sdp_message.length(), sdp);
-    g_assert_cmpint (ret, ==, GST_SDP_OK);
+    std::vector<unsigned char> temp_sdp_message(sdp_message.data(), sdp_message.data() + sdp_message.length() + 1);
+    ret = gst_sdp_message_parse_buffer(temp_sdp_message.data(), sdp_message.length(), sdp);
+    g_assert_cmpint(ret, ==, GST_SDP_OK);
 
     answer = gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp);
     g_assert_nonnull(answer);
@@ -369,7 +349,7 @@ static void onSDPAnswer(json data) {
 
     /* Set remote description on our pipeline */
     promise = gst_promise_new();
-    webrtc = gst_bin_get_by_name(GST_BIN (pipeline), identifier.c_str());
+    webrtc = gst_bin_get_by_name(GST_BIN(pipeline), identifier.c_str());
     g_assert_nonnull(webrtc);
     g_signal_emit_by_name(webrtc, "set-remote-description", answer, promise);
     gst_object_unref(webrtc);
@@ -380,12 +360,13 @@ static void onSDPAnswer(json data) {
 
 
 static void onICEAnswer(json data) {
+    cout << "Received ICE Answer" << endl;
     string identifier = data["identifier"];
     string candidate = data["ice"]["candidate"];
     gint sdpmlineindex = data["ice"]["sdpMLineIndex"];
 
     /* Add ice candidate sent by remote peer */
-    GstElement* webrtc = gst_bin_get_by_name(GST_BIN (pipeline), identifier.c_str());
+    GstElement* webrtc = gst_bin_get_by_name(GST_BIN(pipeline), identifier.c_str());
     g_assert_nonnull(webrtc);
     g_signal_emit_by_name(webrtc, "add-ice-candidate", sdpmlineindex, candidate.c_str());
     gst_object_unref(webrtc);
@@ -399,12 +380,12 @@ static void onClose(SoupWebsocketConnection* conn G_GNUC_UNUSED, gpointer user_d
 
 
 static void onMessage(SoupWebsocketConnection* conn, SoupWebsocketDataType type, GBytes* message, gpointer user_data) {
-    if(type == SOUP_WEBSOCKET_DATA_TEXT) {
+    if (type == SOUP_WEBSOCKET_DATA_TEXT) {
         gsize size;
-        string raw_data = (gchar*)g_bytes_get_data(message, &size);
+        string raw_data = static_cast<const char*>(g_bytes_get_data(message, &size));
         json data = json::parse(raw_data);
 
-        if (commandsMapping.find(data["command"].get<string>()) != commandsMapping.end() ) {
+        if (commandsMapping.find(data["command"].get<string>()) != commandsMapping.end()) {
             commandsMapping[data["command"].get<string>()](data);
         } else {
             cout << "Command not found: " << data << endl;
@@ -425,7 +406,7 @@ static void onOpen(SoupSession * session, GAsyncResult * res, SoupMessage *msg) 
         return;
     }
 
-    g_assert_nonnull (ws_conn);
+    g_assert_nonnull(ws_conn);
 
     app_state = SERVER_CONNECTED;
     g_print("Connected to signalling server\n");
@@ -442,7 +423,7 @@ static void onOpen(SoupSession * session, GAsyncResult * res, SoupMessage *msg) 
 static void connect() {
     SoupSession* session = soup_session_new();
     SoupLogger* logger = soup_logger_new(SOUP_LOGGER_LOG_BODY, -1);
-    soup_session_add_feature(session, SOUP_SESSION_FEATURE (logger));
+    soup_session_add_feature(session, SOUP_SESSION_FEATURE(logger));
     g_object_unref(logger);
 
     SoupMessage* message = soup_message_new(SOUP_METHOD_GET, server_url.c_str());
@@ -464,7 +445,7 @@ static bool check_plugins(void) {
 
     registry = gst_registry_get();
     ret = true;
-    for (auto need: needed) {
+    for (auto need : needed) {
         plugin = gst_registry_find_plugin(registry, need.c_str());
         if (!plugin) {
             cout << "Required gstreamer plugin " << need << " not found" << endl;
@@ -477,8 +458,7 @@ static bool check_plugins(void) {
 }
 
 
-static GOptionEntry entries[] =
-{
+static GOptionEntry entries[] = {
   { "local-id", 0, 0, G_OPTION_ARG_STRING, &local_id, "Camera identifier", "string" },
   { NULL },
 };
@@ -488,11 +468,11 @@ int main(int argc, char *argv[]) {
     GOptionContext *context;
     GError *error = NULL;
 
-    context = g_option_context_new ("- gstreamer webrtc sendrecv demo");
-    g_option_context_add_main_entries (context, entries, NULL);
-    g_option_context_add_group (context, gst_init_get_option_group ());
-    if (!g_option_context_parse (context, &argc, &argv, &error)) {
-        g_printerr ("Error initializing: %s\n", error->message);
+    context = g_option_context_new("- gstreamer webrtc sendrecv demo");
+    g_option_context_add_main_entries(context, entries, NULL);
+    g_option_context_add_group(context, gst_init_get_option_group());
+    if (!g_option_context_parse(context, &argc, &argv, &error)) {
+        g_printerr("Error initializing: %s\n", error->message);
         return -1;
     }
 
@@ -504,7 +484,7 @@ int main(int argc, char *argv[]) {
     commandsMapping["SDP_ANSWER"] = onSDPAnswer;
     commandsMapping["ICE_ANSWER"] = onICEAnswer;
 
-    if (!check_plugins ())
+    if (!check_plugins())
         return -1;
     connect();
 
