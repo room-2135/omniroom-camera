@@ -271,7 +271,7 @@ static gboolean start_pipeline(void) {
      * inside the same pipeline. We start by connecting it to a fakesink so that
      * we can preroll early. */
     pipeline = gst_parse_launch("tee name=videotee ! queue ! fakesink "
-            "videotestsrc ! videoconvert ! videoscale ! video/x-raw,width=800,height=600,framerate=30/1 ! queue ! vp8enc deadline=1 ! rtpvp8pay ! "
+            "videotestsrc ! videoconvert ! videoscale ! video/x-raw,width=800,height=600,framerate=30/1 ! clockoverlay time-format=\"%d/%m/%Y %H:%M:%S\" ! queue ! vp8enc deadline=1 ! rtpvp8pay ! "
             "queue ! " RTP_CAPS_VP8(96) " ! videotee. ",
             &error);
 
