@@ -129,6 +129,8 @@ static void onOfferCreated(GstPromise* promise, gpointer peer_id) {
 
     std::string* identifier = static_cast<std::string*>(peer_id);
 
+    cout << "Offer created" << endl;
+
     g_assert_cmpint(app_state, ==, ROOM_CALL_OFFERING);
 
     g_assert_cmpint(gst_promise_wait(promise), ==, GST_PROMISE_RESULT_REPLIED);
@@ -153,6 +155,8 @@ static void onNegotiationNeeded(GstElement* webrtc, gpointer peer_id) {
     GstPromise *promise;
 
     std::string* identifier = static_cast<std::string*>(peer_id);
+
+    cout << "Negotiation needed" << endl;
 
     app_state = ROOM_CALL_OFFERING;
     promise = gst_promise_new_with_change_func((GstPromiseChangeFunc) onOfferCreated, peer_id, NULL);
@@ -236,7 +240,10 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
      * will create an SDP offer with no media lines in it. */
     peers.push_back(peer_id);
     if (offer) {
+        cout << "Offer" << endl;
         g_signal_connect(webrtc, "on-negotiation-needed", G_CALLBACK(onNegotiationNeeded), static_cast<gpointer>(&(peers.back())));
+    } else {
+        cout << "No offer" << endl;
     }
 
     /* We need to transmit this ICE candidate to the browser via the websockets
@@ -261,7 +268,6 @@ static void callPeer(json data) {
 #define RTP_CAPS_OPUS(x) "application/x-rtp,media=audio,encoding-name=OPUS,payload=" STR(x)
 #define RTP_CAPS_H264(x) "application/x-rtp,media=video,encoding-name=H264,payload=" STR(x)
 
-
 static gboolean start_pipeline(void) {
     GstStateChangeReturn ret;
     GError *error = NULL;
@@ -271,8 +277,7 @@ static gboolean start_pipeline(void) {
      * inside the same pipeline. We start by connecting it to a fakesink so that
      * we can preroll early. */
     pipeline = gst_parse_launch("tee name=videotee ! queue ! fakesink "
-            "videotestsrc ! video/x-raw,width=800,height=600,framerate=30/1 ! clockoverlay time-format=\"%d/%m/%Y %H:%M:%S\" ! queue ! x264enc ! rtph264pay ! "
-            "queue ! " RTP_CAPS_H264(96) " ! videotee. ",
+            "rpicamsrc bitrate=1000000 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! rtph264pay config-interval=1 pt=96 ! " RTP_CAPS_H264(96) " ! videotee. ",
             &error);
 
     if (error) {
@@ -330,7 +335,7 @@ static void onSDPAnswer(json data) {
 
     g_assert_cmpint(app_state, >=, ROOM_CALL_OFFERING);
 
-    //cout << "Received SDP answer: " << endl << data["offer"] << endl;
+    cout << "Received SDP answer: " << endl << data["offer"] << endl;
 
     ret = gst_sdp_message_new(&sdp);
     g_assert_cmpint(ret, ==, GST_SDP_OK);
