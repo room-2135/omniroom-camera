@@ -259,7 +259,7 @@ static void callPeer(json data) {
 
 #define STR(x) #x
 #define RTP_CAPS_OPUS(x) "application/x-rtp,media=audio,encoding-name=OPUS,payload=" STR(x)
-#define RTP_CAPS_VP8(x) "application/x-rtp,media=video,encoding-name=VP8,payload=" STR(x)
+#define RTP_CAPS_H264(x) "application/x-rtp,media=video,encoding-name=H264,payload=" STR(x)
 
 
 static gboolean start_pipeline(void) {
@@ -271,8 +271,8 @@ static gboolean start_pipeline(void) {
      * inside the same pipeline. We start by connecting it to a fakesink so that
      * we can preroll early. */
     pipeline = gst_parse_launch("tee name=videotee ! queue ! fakesink "
-            "videotestsrc ! videoconvert ! videoscale ! video/x-raw,width=800,height=600,framerate=30/1 ! clockoverlay time-format=\"%d/%m/%Y %H:%M:%S\" ! queue ! vp8enc deadline=1 ! rtpvp8pay ! "
-            "queue ! " RTP_CAPS_VP8(96) " ! videotee. ",
+            "videotestsrc ! video/x-raw,width=800,height=600,framerate=30/1 ! clockoverlay time-format=\"%d/%m/%Y %H:%M:%S\" ! queue ! x264enc ! rtph264pay ! "
+            "queue ! " RTP_CAPS_H264(96) " ! videotee. ",
             &error);
 
     if (error) {
