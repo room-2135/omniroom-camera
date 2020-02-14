@@ -61,7 +61,7 @@ static int server_port = 8000;
 static string input_stream = "videotestsrc ! x264enc";
 static string payload_stream = "rtph264pay ! application/x-rtp,media=video,encoding-name=H264,payload=96";
 
-static SoupWebsocketConnection *ws_conn = NULL;
+static SoupWebsocketConnection *ws_conn = nullptr;
 static enum AppState app_state = APP_STATE_UNKNOWN;
 
 static bool cleanup_and_quit_loop(string msg, enum AppState state) {
@@ -81,7 +81,7 @@ static bool cleanup_and_quit_loop(string msg, enum AppState state) {
 
     if (loop) {
         g_main_loop_quit(loop);
-        loop = NULL;
+        loop = nullptr;
     }
 
     /* To allow usage as a GSourceFunc */
@@ -138,7 +138,7 @@ static void onOfferCreated(GstPromise* promise, gpointer peer_id) {
 
     g_assert_cmpint(gst_promise_wait(promise), ==, GST_PROMISE_RESULT_REPLIED);
     reply = gst_promise_get_reply(promise);
-    gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, NULL);
+    gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, nullptr);
     gst_promise_unref(promise);
 
     promise = gst_promise_new();
@@ -162,8 +162,8 @@ static void onNegotiationNeeded(GstElement* webrtc, gpointer peer_id) {
     cout << "Negotiation needed" << endl;
 
     app_state = ROOM_CALL_OFFERING;
-    promise = gst_promise_new_with_change_func((GstPromiseChangeFunc) onOfferCreated, peer_id, NULL);
-    g_signal_emit_by_name(webrtc, "create-offer", NULL, promise);
+    promise = gst_promise_new_with_change_func((GstPromiseChangeFunc) onOfferCreated, peer_id, nullptr);
+    g_signal_emit_by_name(webrtc, "create-offer", nullptr, promise);
 }
 
 
@@ -213,7 +213,7 @@ static void add_peer_to_pipeline(string peer_id, gboolean offer) {
     g_assert_nonnull(webrtc);
 
     g_assert_nonnull(pipeline);
-    gst_bin_add_many(GST_BIN(pipeline), q, webrtc, NULL);
+    gst_bin_add_many(GST_BIN(pipeline), q, webrtc, nullptr);
 
     srcpad = gst_element_get_static_pad(q, "src");
     g_assert_nonnull(srcpad);
@@ -269,7 +269,7 @@ static void callPeer(json data) {
 
 static gboolean start_pipeline(void) {
     GstStateChangeReturn ret;
-    GError *error = NULL;
+    GError *error = nullptr;
 
     /* NOTE: webrtcbin currently does not support dynamic addition/removal of
      * streams, so we use a separate webrtcbin for each peer, but all of them are
@@ -401,7 +401,7 @@ static void onMessage(SoupWebsocketConnection* conn, SoupWebsocketDataType type,
 
 
 static void onOpen(SoupSession * session, GAsyncResult * res, SoupMessage *msg) {
-    GError *error = NULL;
+    GError *error = nullptr;
 
     ws_conn = soup_session_websocket_connect_finish(session, res, &error);
     if (error) {
@@ -415,8 +415,8 @@ static void onOpen(SoupSession * session, GAsyncResult * res, SoupMessage *msg) 
     app_state = SERVER_CONNECTED;
     g_print("Connected to signalling server\n");
 
-    g_signal_connect(ws_conn, "closed", G_CALLBACK(onClose), NULL);
-    g_signal_connect(ws_conn, "message", G_CALLBACK(onMessage), NULL);
+    g_signal_connect(ws_conn, "closed", G_CALLBACK(onClose), nullptr);
+    g_signal_connect(ws_conn, "message", G_CALLBACK(onMessage), nullptr);
     join();
 }
 
@@ -436,7 +436,7 @@ static void connect() {
     cout << "Connecting to server..." << endl;
 
     /* Once connected, we will register */
-    soup_session_websocket_connect_async(session, message, NULL, NULL, NULL, (GAsyncReadyCallback) onOpen, message);
+    soup_session_websocket_connect_async(session, message, nullptr, nullptr, nullptr, (GAsyncReadyCallback) onOpen, message);
     app_state = SERVER_CONNECTING;
 }
 
@@ -465,13 +465,13 @@ static bool check_plugins(void) {
 
 GOptionContext* createContext(int argc, char *argv[]) {
     GOptionContext* context;
-    GError* error = NULL;
+    GError* error = nullptr;
 
-    gchar* g_local_id;
-    gchar* g_server_address;
+    gchar* g_local_id = nullptr;
+    gchar* g_server_address = nullptr;
     int g_server_port;
-    gchar* g_input_stream;
-    gchar* g_payload_stream;
+    gchar* g_input_stream = nullptr;
+    gchar* g_payload_stream = nullptr;
 
     GOptionEntry entries[] = {
       { "local-id", 'i', 0, G_OPTION_ARG_STRING, &g_local_id, "Camera identifier", "string" },
@@ -479,11 +479,11 @@ GOptionContext* createContext(int argc, char *argv[]) {
       { "server-port", 'p', 0, G_OPTION_ARG_INT, &g_server_port, "Signalling server's port", "int" },
       { "input-stream", 0, 0, G_OPTION_ARG_STRING, &g_input_stream, "Stream source and encoding", "string" },
       { "payload-stream", 0, 0, G_OPTION_ARG_STRING, &g_payload_stream, "Stream payload", "string" },
-      { NULL },
+      { nullptr },
     };
 
     context = g_option_context_new("- gstreamer webrtc sendrecv demo");
-    g_option_context_add_main_entries(context, entries, NULL);
+    g_option_context_add_main_entries(context, entries, nullptr);
     g_option_context_add_group(context, gst_init_get_option_group());
     if (!g_option_context_parse(context, &argc, &argv, &error)) {
         g_printerr("Error initializing: %s\n", error->message);
@@ -523,7 +523,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    loop = g_main_loop_new(NULL, false);
+    loop = g_main_loop_new(nullptr, false);
 
     commandsMapping["JOINED_CAMERA"] = doRegistration;
     commandsMapping["UPDATE_CAMERAS"] = notMapped;
