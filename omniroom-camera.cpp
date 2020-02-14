@@ -55,11 +55,14 @@ static vector<string> peers;
 typedef void (*callback)(json data);
 static map<string, callback> commandsMapping;
 
+static string local_id;
+static string server_address = "127.0.0.1";
+static int server_port = 8000;
+static string input_stream = "videotestsrc ! x264enc";
+static string payload_stream = "rtph264pay ! application/x-rtp,media=video,encoding-name=H264,payload=96";
+
 static SoupWebsocketConnection *ws_conn = NULL;
 static enum AppState app_state = APP_STATE_UNKNOWN;
-static string server_url = "ws://127.0.0.1:8000";
-static string local_id = "1234567890ab";
-static bool strict_ssl = false;
 
 static bool cleanup_and_quit_loop(string msg, enum AppState state) {
     if (!msg.empty())
@@ -264,10 +267,6 @@ static void callPeer(json data) {
     add_peer_to_pipeline(data["identifier"].get<string>(), true);
 }
 
-#define STR(x) #x
-#define RTP_CAPS_OPUS(x) "application/x-rtp,media=audio,encoding-name=OPUS,payload=" STR(x)
-#define RTP_CAPS_H264(x) "application/x-rtp,media=video,encoding-name=H264,payload=" STR(x)
-
 static gboolean start_pipeline(void) {
     GstStateChangeReturn ret;
     GError *error = NULL;
@@ -276,9 +275,9 @@ static gboolean start_pipeline(void) {
      * streams, so we use a separate webrtcbin for each peer, but all of them are
      * inside the same pipeline. We start by connecting it to a fakesink so that
      * we can preroll early. */
-    pipeline = gst_parse_launch("tee name=videotee ! queue ! fakesink "
-            "rpicamsrc bitrate=1000000 ! video/x-h264,width=1920,height=1080,framerate=30/1 ! h264parse ! rtph264pay config-interval=1 pt=96 ! " RTP_CAPS_H264(96) " ! videotee. ",
-            &error);
+    const string pipeline_stream = input_stream + " ! " + payload_stream + " ! queue ! tee name=videotee ! queue ! fakesink";
+    cout << "Pipeline: " << pipeline_stream << endl;
+    pipeline = gst_parse_launch(pipeline_stream.c_str(), &error);
 
     if (error) {
         g_printerr("Failed to parse launch: %s\n", error->message);
@@ -431,6 +430,7 @@ static void connect() {
     soup_session_add_feature(session, SOUP_SESSION_FEATURE(logger));
     g_object_unref(logger);
 
+    string server_url = "ws://" + server_address + ":" + std::to_string(server_port);
     SoupMessage* message = soup_message_new(SOUP_METHOD_GET, server_url.c_str());
 
     cout << "Connecting to server..." << endl;
@@ -463,21 +463,63 @@ static bool check_plugins(void) {
 }
 
 
-static GOptionEntry entries[] = {
-  { "local-id", 0, 0, G_OPTION_ARG_STRING, &local_id, "Camera identifier", "string" },
-  { NULL },
-};
+GOptionContext* createContext(int argc, char *argv[]) {
+    GOptionContext* context;
+    GError* error = NULL;
 
+    gchar* g_local_id;
+    gchar* g_server_address;
+    int g_server_port;
+    gchar* g_input_stream;
+    gchar* g_payload_stream;
 
-int main(int argc, char *argv[]) {
-    GOptionContext *context;
-    GError *error = NULL;
+    GOptionEntry entries[] = {
+      { "local-id", 'i', 0, G_OPTION_ARG_STRING, &g_local_id, "Camera identifier", "string" },
+      { "server-address", 'a', 0, G_OPTION_ARG_STRING, &g_server_address, "Signalling server's address", "string" },
+      { "server-port", 'p', 0, G_OPTION_ARG_INT, &g_server_port, "Signalling server's port", "int" },
+      { "input-stream", 0, 0, G_OPTION_ARG_STRING, &g_input_stream, "Stream source and encoding", "string" },
+      { "payload-stream", 0, 0, G_OPTION_ARG_STRING, &g_payload_stream, "Stream payload", "string" },
+      { NULL },
+    };
 
     context = g_option_context_new("- gstreamer webrtc sendrecv demo");
     g_option_context_add_main_entries(context, entries, NULL);
     g_option_context_add_group(context, gst_init_get_option_group());
     if (!g_option_context_parse(context, &argc, &argv, &error)) {
         g_printerr("Error initializing: %s\n", error->message);
+        return nullptr;
+    }
+
+    if(g_local_id) {
+        local_id = string(g_local_id);
+    } else {
+        cout << "You must provide a local id" << endl;
+        return nullptr;
+    }
+
+    if(g_server_address) {
+        server_address = string(g_server_address);
+    }
+
+    if(g_server_port) {
+        server_port = g_server_port;
+    }
+
+    if(g_input_stream) {
+        input_stream = string(g_input_stream);
+    }
+
+    if(g_payload_stream) {
+        payload_stream = string(g_payload_stream);
+    }
+
+    return context;
+}
+
+
+int main(int argc, char *argv[]) {
+    GOptionContext* context = createContext(argc, argv);
+    if(!context){
         return -1;
     }
 
