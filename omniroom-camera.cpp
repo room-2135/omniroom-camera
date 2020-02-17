@@ -61,6 +61,11 @@ static int server_port = 8000;
 static string input_stream = "videotestsrc ! x264enc";
 static string payload_stream = "rtph264pay ! application/x-rtp,media=video,encoding-name=H264,payload=96";
 
+static bool use_ssl = false;
+static bool use_http_auth = false;
+static string http_user;
+static string http_password;
+
 static SoupWebsocketConnection *ws_conn = nullptr;
 static enum AppState app_state = APP_STATE_UNKNOWN;
 
@@ -425,15 +430,33 @@ static void onOpen(SoupSession * session, GAsyncResult * res, SoupMessage *msg) 
  * Connect to the signalling server. This is the entrypoint for everything else.
  */
 static void connect() {
-    SoupSession* session = soup_session_new();
+    const char* https_aliases[] = {"wss", NULL};
+    SoupSession* session = soup_session_new_with_options (SOUP_SESSION_SSL_STRICT, use_ssl,
+      SOUP_SESSION_SSL_USE_SYSTEM_CA_FILE, TRUE,
+      SOUP_SESSION_HTTPS_ALIASES, https_aliases, NULL);
+
     SoupLogger* logger = soup_logger_new(SOUP_LOGGER_LOG_BODY, -1);
     soup_session_add_feature(session, SOUP_SESSION_FEATURE(logger));
     g_object_unref(logger);
 
-    string server_url = "ws://" + server_address + ":" + std::to_string(server_port);
+    string protocol;
+    if(use_ssl) {
+        protocol = "wss://";
+    } else {
+        protocol = "ws://";
+    }
+    string server_url = protocol + server_address + ":" + std::to_string(server_port);
+
     SoupMessage* message = soup_message_new(SOUP_METHOD_GET, server_url.c_str());
 
-    cout << "Connecting to server..." << endl;
+    if(use_http_auth) {
+        soup_session_add_feature_by_type(session, SOUP_TYPE_AUTH_BASIC);
+        SoupURI* uri = soup_message_get_uri(message);
+        soup_uri_set_user(uri, http_user.c_str());
+        soup_uri_set_password(uri, http_password.c_str());
+    }
+
+    cout << "Connecting to server: " << server_url << endl;
 
     /* Once connected, we will register */
     soup_session_websocket_connect_async(session, message, nullptr, nullptr, nullptr, (GAsyncReadyCallback) onOpen, message);
@@ -472,6 +495,10 @@ GOptionContext* createContext(int argc, char *argv[]) {
     int g_server_port;
     gchar* g_input_stream = nullptr;
     gchar* g_payload_stream = nullptr;
+    bool g_use_ssl;
+    bool g_use_http_auth;
+    gchar* g_http_user = nullptr;
+    gchar* g_http_password = nullptr;
 
     GOptionEntry entries[] = {
       { "local-id", 'i', 0, G_OPTION_ARG_STRING, &g_local_id, "Camera identifier", "string" },
@@ -479,6 +506,10 @@ GOptionContext* createContext(int argc, char *argv[]) {
       { "server-port", 'p', 0, G_OPTION_ARG_INT, &g_server_port, "Signalling server's port", "int" },
       { "input-stream", 0, 0, G_OPTION_ARG_STRING, &g_input_stream, "Stream source and encoding", "string" },
       { "payload-stream", 0, 0, G_OPTION_ARG_STRING, &g_payload_stream, "Stream payload", "string" },
+      { "ssl", 0, 0, G_OPTION_ARG_NONE, &g_use_ssl, "Enable ssl", nullptr },
+      { "http-auth", 0, 0, G_OPTION_ARG_NONE, &g_use_http_auth, "Enable HTTP basic authentication", nullptr },
+      { "http-user", 0, 0, G_OPTION_ARG_STRING, &g_http_user, "HTTP basic authentication user", "string" },
+      { "http-password", 0, 0, G_OPTION_ARG_STRING, &g_http_password, "HTTP basic authentication password", "string" },
       { nullptr },
     };
 
@@ -511,6 +542,22 @@ GOptionContext* createContext(int argc, char *argv[]) {
 
     if(g_payload_stream) {
         payload_stream = string(g_payload_stream);
+    }
+
+    if(g_use_ssl) {
+        use_ssl = g_use_ssl;
+    }
+
+    if(g_use_http_auth) {
+        use_http_auth = g_use_http_auth;
+    }
+
+    if(g_http_user) {
+        http_user = string(g_http_user);
+    }
+
+    if(g_http_password) {
+        http_password = string(g_http_password);
     }
 
     return context;
