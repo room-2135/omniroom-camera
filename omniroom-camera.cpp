@@ -492,11 +492,11 @@ GOptionContext* createContext(int argc, char *argv[]) {
 
     gchar* g_local_id = nullptr;
     gchar* g_server_address = nullptr;
-    int g_server_port;
+    gint g_server_port = 0;
     gchar* g_input_stream = nullptr;
     gchar* g_payload_stream = nullptr;
-    bool g_use_ssl;
-    bool g_use_http_auth;
+    gboolean g_use_ssl = false;
+    gboolean g_use_http_auth = false;
     gchar* g_http_user = nullptr;
     gchar* g_http_password = nullptr;
 
